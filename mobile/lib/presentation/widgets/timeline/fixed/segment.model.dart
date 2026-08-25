@@ -204,22 +204,90 @@ class _AssetTileWidget extends ConsumerWidget {
 
   const _AssetTileWidget({super.key, required this.asset, required this.assetIndex});
 
-  Future _handleOnTap(BuildContext ctx, WidgetRef ref, int assetIndex, BaseAsset asset, int? heroOffset) async {
+  Future<void> _scrollToAsset(
+    BuildContext context,
+    WidgetRef ref,
+    TimelineService timelineService,
+    ScrollableState? scrollableState,
+    int index,
+  ) async {
+    if (!context.mounted ||
+        !identical(timelineService, ref.read(timelineServiceProvider)) ||
+        index < 0 ||
+        index >= timelineService.totalAssets) {
+      return;
+    }
+
+    final segments = await ref.read(timelineSegmentProvider.future);
+    if (!context.mounted || !identical(timelineService, ref.read(timelineServiceProvider))) {
+      return;
+    }
+
+    final targetSegment = segments.whereType<FixedSegment>().lastWhereOrNull(
+      (segment) => segment.firstAssetIndex <= index,
+    );
+    if (targetSegment == null || index >= targetSegment.firstAssetIndex + targetSegment.bucket.assetCount) {
+      return;
+    }
+
+    final assetIndexInSegment = index - targetSegment.firstAssetIndex;
+    final rowIndexInSegment = assetIndexInSegment ~/ targetSegment.columnCount;
+    final targetRowIndex = targetSegment.firstIndex + 1 + rowIndexInSegment;
+    final targetOffset = targetSegment.indexToLayoutOffset(targetRowIndex);
+    final targetEndOffset = targetOffset + targetSegment.tileHeight;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!context.mounted || scrollableState == null || !scrollableState.mounted) {
+        return;
+      }
+
+      final position = scrollableState.position;
+      final viewportStart = position.pixels;
+      final viewportEnd = viewportStart + position.viewportDimension;
+      final isTargetVisible = targetOffset >= viewportStart && targetEndOffset <= viewportEnd;
+      if (isTargetVisible) {
+        return;
+      }
+
+      final destination = targetOffset < viewportStart ? targetOffset : targetEndOffset - position.viewportDimension;
+      unawaited(
+        position.animateTo(
+          destination.clamp(0.0, position.maxScrollExtent),
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
+
+  Future _handleOnTap(
+    BuildContext ctx,
+    WidgetRef ref,
+    int assetIndex,
+    BaseAsset asset,
+    int? heroOffset,
+  ) async {
     final multiSelectState = ref.read(multiSelectProvider);
 
     if (multiSelectState.forceEnable || multiSelectState.isEnabled) {
       ref.read(multiSelectProvider.notifier).toggleAssetSelection(asset);
     } else {
-      await ref.read(timelineServiceProvider).loadAssets(assetIndex, 1);
+      final timelineService = ref.read(timelineServiceProvider);
+      final scrollableState = Scrollable.maybeOf(ctx);
+      await timelineService.loadAssets(assetIndex, 1);
+      if (!ctx.mounted) {
+        return;
+      }
       ref.read(isPlayingMotionVideoProvider.notifier).playing = false;
       AssetViewer.setAsset(ref, asset);
       unawaited(
         ctx.pushRoute(
           AssetViewerRoute(
             initialIndex: assetIndex,
-            timelineService: ref.read(timelineServiceProvider),
+            timelineService: timelineService,
             heroOffset: heroOffset,
             currentAlbum: ref.read(currentRemoteAlbumProvider),
+            onClose: (index) => unawaited(_scrollToAsset(ctx, ref, timelineService, scrollableState, index)),
           ),
         ),
       );
