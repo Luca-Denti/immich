@@ -129,6 +129,7 @@ class AssetViewerRoute extends PageRouteInfo<AssetViewerRouteArgs> {
     required TimelineService timelineService,
     int? heroOffset,
     RemoteAlbum? currentAlbum,
+    ValueChanged<int>? onClose,
     List<PageRouteInfo>? children,
   }) : super(
          AssetViewerRoute.name,
@@ -138,6 +139,7 @@ class AssetViewerRoute extends PageRouteInfo<AssetViewerRouteArgs> {
            timelineService: timelineService,
            heroOffset: heroOffset,
            currentAlbum: currentAlbum,
+           onClose: onClose,
          ),
          initialChildren: children,
        );
@@ -154,6 +156,7 @@ class AssetViewerRoute extends PageRouteInfo<AssetViewerRouteArgs> {
         timelineService: args.timelineService,
         heroOffset: args.heroOffset,
         currentAlbum: args.currentAlbum,
+        onClose: args.onClose,
       );
     },
   );
@@ -166,6 +169,7 @@ class AssetViewerRouteArgs {
     required this.timelineService,
     this.heroOffset,
     this.currentAlbum,
+    this.onClose,
   });
 
   final Key? key;
@@ -178,9 +182,11 @@ class AssetViewerRouteArgs {
 
   final RemoteAlbum? currentAlbum;
 
+  final ValueChanged<int>? onClose;
+
   @override
   String toString() {
-    return 'AssetViewerRouteArgs{key: $key, initialIndex: $initialIndex, timelineService: $timelineService, heroOffset: $heroOffset, currentAlbum: $currentAlbum}';
+    return 'AssetViewerRouteArgs{key: $key, initialIndex: $initialIndex, timelineService: $timelineService, heroOffset: $heroOffset, currentAlbum: $currentAlbum, onClose: $onClose}';
   }
 
   @override
@@ -191,7 +197,8 @@ class AssetViewerRouteArgs {
         initialIndex == other.initialIndex &&
         timelineService == other.timelineService &&
         heroOffset == other.heroOffset &&
-        currentAlbum == other.currentAlbum;
+        currentAlbum == other.currentAlbum &&
+        onClose == other.onClose;
   }
 
   @override
@@ -200,7 +207,8 @@ class AssetViewerRouteArgs {
       initialIndex.hashCode ^
       timelineService.hashCode ^
       heroOffset.hashCode ^
-      currentAlbum.hashCode;
+      currentAlbum.hashCode ^
+      onClose.hashCode;
 }
 
 /// generated route for
