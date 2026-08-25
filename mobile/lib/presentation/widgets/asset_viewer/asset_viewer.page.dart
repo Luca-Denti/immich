@@ -33,6 +33,7 @@ class AssetViewerPage extends StatelessWidget {
   final TimelineService timelineService;
   final int? heroOffset;
   final RemoteAlbum? currentAlbum;
+  final ValueChanged<int>? onClose;
 
   const AssetViewerPage({
     super.key,
@@ -40,6 +41,7 @@ class AssetViewerPage extends StatelessWidget {
     required this.timelineService,
     this.heroOffset,
     this.currentAlbum,
+    this.onClose,
   });
 
   @override
@@ -51,7 +53,7 @@ class AssetViewerPage extends StatelessWidget {
         timelineServiceProvider.overrideWithValue(timelineService),
         currentRemoteAlbumScopedProvider.overrideWithValue(currentAlbum),
       ],
-      child: AssetViewer(initialIndex: initialIndex, heroOffset: heroOffset),
+      child: AssetViewer(initialIndex: initialIndex, heroOffset: heroOffset, onClose: onClose),
     );
   }
 }
@@ -59,8 +61,9 @@ class AssetViewerPage extends StatelessWidget {
 class AssetViewer extends ConsumerStatefulWidget {
   final int initialIndex;
   final int? heroOffset;
+  final ValueChanged<int>? onClose;
 
-  const AssetViewer({super.key, required this.initialIndex, this.heroOffset});
+  const AssetViewer({super.key, required this.initialIndex, this.heroOffset, this.onClose});
 
   @override
   ConsumerState createState() => _AssetViewerState();
@@ -128,6 +131,9 @@ class _AssetViewerState extends ConsumerState<AssetViewer> {
 
   @override
   void dispose() {
+    final currentPage = _pageController.hasClients ? _pageController.page?.round() ?? _currentPage : _currentPage;
+    widget.onClose?.call(currentPage);
+
     _pageController.dispose();
     _preloader.dispose();
     unawaited(_reloadSubscription?.cancel());
