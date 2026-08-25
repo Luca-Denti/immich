@@ -1,0 +1,206 @@
+name: Sync stable
+
+# Ad ogni release STABILE di immich-app/immich (tag vX.Y.Z, esclusi rc/beta):
+#   1. ricostruisce il branch `stable` = tag upstream + le tue patch (cherry-pick)
+#   2. crea il tag `vX.Y.Z-nolecom`
+#   3. richiama "Build APK" e pubblica una Release con gli APK allegati
+#
+# Le tue modifiche vivono sul branch PATCH_BRANCH come commit che non esistono
+# in upstream/main; quel branch non viene mai riscritto da questo workflow.
+# Se una tua patch viene accettata upstream sparisce da sola dalla lista
+# (confronto per patch-id, vedi `git cherry`).
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # ogni giorno alle 07:00 (Europe/Rome)
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Tag upstream da usare (vuoto = ultima release stabile)'
+        required: false
+        type: string
+      force:
+        description: 'Rifai tutto anche se la release esiste già'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: sync-stable
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  UPSTREAM_URL: https://github.com/immich-app/immich.git
+  PATCH_BRANCH: custom # branch con le tue modifiche
+  STABLE_BRANCH: stable # branch generato: tag upstream + tue patch
+  TAG_SUFFIX: -nolecom # suffisso dei tag/release di questo fork
+
+jobs:
+  sync:
+    name: Rebase delle patch sull'ultima stabile
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_tag: ${{ steps.pick.outputs.upstream_tag }}
+      release_tag: ${{ steps.pick.outputs.release_tag }}
+      should_build: ${{ steps.pick.outputs.should_build }}
+      patch_count: ${{ steps.rebase.outputs.patch_count }}
+      notes: ${{ steps.rebase.outputs.notes }}
+    steps:
+      - name: Checkout (storia completa)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream "+refs/heads/main:refs/remotes/upstream/main"
+          git fetch --force upstream "refs/tags/v*:refs/tags/v*"
+          git fetch --no-tags origin "+refs/heads/${PATCH_BRANCH}:refs/remotes/origin/${PATCH_BRANCH}"
+
+      - name: Scegli l'ultima release stabile
+        id: pick
+        env:
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            TAG="$INPUT_TAG"
+            git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null \
+              || { echo "::error::tag upstream '${TAG}' inesistente"; exit 1; }
+          else
+            TAG="$(git tag -l 'v*' --sort=v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -n1)"
+          fi
+          [[ -n "$TAG" ]] || { echo "::error::nessun tag stabile trovato"; exit 1; }
+          RELEASE_TAG="${TAG}${TAG_SUFFIX}"
+          echo "upstream_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${FORCE:-false}" != "true" ]] && \
+             git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Niente da fare: \`${RELEASE_TAG}\` esiste già." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Nuova stabile upstream: \`${TAG}\` -> \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Ricostruisci il branch stable con le tue patch
+        id: rebase
+        if: steps.pick.outputs.should_build == 'true'
+        env:
+          TAG: ${{ steps.pick.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name 'immich-sync[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Le tue patch = commit su $PATCH_BRANCH assenti da upstream/main
+          readarray -t CUSTOM < <(git cherry "upstream/main" "origin/${PATCH_BRANCH}" | awk '$1 == "+" { print $2 }')
+          COUNT=0
+          for c in ${CUSTOM[@]+"${CUSTOM[@]}"}; do
+            [[ -n "$c" ]] && COUNT=$((COUNT + 1))
+          done
+          echo "patch_count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Patch da riapplicare: ${COUNT}"
+
+          git checkout --force -B "$STABLE_BRANCH" "refs/tags/${TAG}"
+
+          for c in ${CUSTOM[@]+"${CUSTOM[@]}"}; do
+            [[ -n "$c" ]] || continue
+            SUBJ="$(git log -1 --format='%s' "$c")"
+            echo "::group::cherry-pick ${c:0:9} — ${SUBJ}"
+            if ! git cherry-pick -x "$c"; then
+              {
+                echo "CONFLICT_COMMIT=${c}"
+                echo "CONFLICT_SUBJECT=${SUBJ}"
+                echo "CONFLICT_FILES=$(git diff --name-only --diff-filter=U | paste -sd ', ' -)"
+              } >> "$GITHUB_ENV"
+              git cherry-pick --abort || true
+              echo "::endgroup::"
+              echo "::error::conflitto applicando '${SUBJ}' su ${TAG}"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
+          git push --force origin "HEAD:refs/heads/${STABLE_BRANCH}"
+          git tag -f "${TAG}${TAG_SUFFIX}"
+          git push --force origin "refs/tags/${TAG}${TAG_SUFFIX}"
+
+          # note della release (output multilinea)
+          {
+            echo 'notes<<NOTES_EOF'
+            echo "Build di **immich ${TAG}** con le modifiche di questo fork applicate sopra."
+            echo ""
+            echo "- base upstream: https://github.com/immich-app/immich/releases/tag/${TAG}"
+            echo "- branch: \`${STABLE_BRANCH}\` (tag \`${TAG}${TAG_SUFFIX}\`)"
+            echo "- patch riapplicate: ${COUNT}"
+            for c in ${CUSTOM[@]+"${CUSTOM[@]}"}; do
+              [[ -n "$c" ]] && echo "  - $(git log -1 --format='%s' "$c")"
+            done
+            echo ""
+            echo "Sul telefono installa \`arm64-v8a\`; \`universal\` se hai dubbi."
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Apri una issue se una patch va in conflitto
+        if: failure() && env.CONFLICT_COMMIT != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pick.outputs.upstream_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Conflitto nel sync su ${TAG}: ${CONFLICT_SUBJECT}"
+          EXISTING="$(gh issue list --state open --limit 100 --json title \
+            --jq "map(select(.title == \"${TITLE}\")) | length")"
+          if [[ "${EXISTING:-0}" != "0" ]]; then
+            echo "issue già aperta, non la duplico"
+            exit 0
+          fi
+          BODY="$(cat <<EOF
+          Il sync automatico su \`${TAG}\` si è fermato: la patch non si applica più senza conflitti.
+
+          - commit: \`${CONFLICT_COMMIT}\`
+          - descrizione: ${CONFLICT_SUBJECT}
+          - file in conflitto: ${CONFLICT_FILES:-n/d}
+
+          ### Come risolvere
+
+          \`\`\`bash
+          git fetch origin && git fetch upstream --tags
+          git checkout -B ${PATCH_BRANCH}-${TAG} ${TAG}
+          git cherry-pick -x ${CONFLICT_COMMIT}
+          # risolvi i conflitti, poi:
+          git add -A && git cherry-pick --continue
+          \`\`\`
+
+          Quando la patch è aggiornata, riscrivi il branch \`${PATCH_BRANCH}\` su quella versione
+          (\`git push --force origin ${PATCH_BRANCH}-${TAG}:${PATCH_BRANCH}\`) e rilancia
+          "Sync stable" con \`force = true\`.
+
+          Run: ${RUN_URL}
+          EOF
+          )"
+          gh issue create --title "$TITLE" --body "$BODY"
+
+  apk:
+    name: APK
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    uses: ./.github/workflows/build-apk.yml
+    secrets: inherit
+    permissions:
+      contents: write
+    with:
+      ref: ${{ needs.sync.outputs.release_tag }}
+      release_name: Immich ${{ needs.sync.outputs.upstream_tag }} (fork Nolecom)
+      release_notes: ${{ needs.sync.outputs.notes }}
+      publish_release: true
