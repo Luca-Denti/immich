@@ -1,0 +1,191 @@
+name: Build APK
+
+# Compila gli APK Android di questo fork.
+# - a mano: Actions > "Build APK" > Run workflow (scegli branch/tag/commit)
+# - automatico: richiamato da "Sync stable" dopo ogni release stabile upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag o commit da compilare'
+        required: true
+        default: 'main'
+        type: string
+      publish_release:
+        description: 'Pubblica una Release con gli APK (il ref deve essere un tag)'
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      release_name:
+        required: false
+        type: string
+      release_notes:
+        required: false
+        type: string
+      publish_release:
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: APK Android (${{ inputs.ref }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MISE_EXPERIMENTAL: '1'
+      MISE_YES: '1'
+    steps:
+      - name: Checkout ${{ inputs.ref }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Libera spazio sul runner
+        run: |
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/share/dotnet /usr/share/swift \
+            /usr/local/share/powershell /usr/local/lib/heroku /opt/ghc 2>/dev/null || true
+          df -h / | tail -1
+
+      - name: Installa mise
+        run: |
+          set -euo pipefail
+          curl -fsSL https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Cache strumenti mise (Flutter, Java, ...)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/mise
+            ~/.cache/mise
+          key: mise-${{ runner.os }}-${{ hashFiles('mise.lock', 'mise.toml', 'mobile/mise.lock', 'mobile/mise.toml') }}
+          restore-keys: |
+            mise-${{ runner.os }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            mobile/android/.gradle
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/pubspec.lock') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Fidati delle config mise del repo
+        run: mise trust --all
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Dipendenze (mise //mobile:install:ci)
+        run: mise //mobile:install:ci
+
+      - name: Codegen
+        run: |
+          set -euo pipefail
+          # `codegen` copre build_runner (e, sui tag recenti, anche pigeon/drift/traduzioni).
+          # Sui tag più vecchi pigeon e traduzioni vanno lanciati a parte: sono idempotenti.
+          mise //mobile:codegen
+          mise //mobile:codegen:pigeon
+          mise //mobile:i18n:loader
+          mise //mobile:i18n:keys
+
+      - name: NDK richiesto da Flutter
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          FLUTTER_DIR="$(mise where 'aqua:flutter/flutter' 2>/dev/null || true)"
+          NDK_VER="$(grep -rhoP 'ndkVersion\s*=\s*"?\K[0-9]+\.[0-9]+\.[0-9]+' \
+            "${FLUTTER_DIR}/packages/flutter_tools/gradle/" 2>/dev/null | head -n1)"
+          echo "NDK richiesto: ${NDK_VER:-sconosciuto}"
+          if [[ -n "${NDK_VER:-}" ]]; then
+            sdkmanager --install "ndk;${NDK_VER}" "cmake;3.22.1" >/dev/null || true
+          fi
+
+      - name: Keystore di firma
+        env:
+          KEY_JKS: ${{ secrets.KEY_JKS }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${KEY_JKS:-}" ]]; then
+            printf '%s' "$KEY_JKS" | base64 -d > mobile/android/key.jks
+            echo "APK firmato con il keystore dei secrets" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::secret KEY_JKS assente: APK firmato con la chiave debug (per aggiornare dovrai disinstallare l'app)"
+          fi
+
+      - name: Build APK release
+        working-directory: ./mobile
+        env:
+          ALIAS: ${{ secrets.ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mise exec -- flutter build apk --release
+          mise exec -- flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64,android-x64
+
+      - name: Raccogli e rinomina gli APK
+        env:
+          REF_NAME: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          SLUG="$(echo "$REF_NAME" | tr '/' '-')"
+          mkdir -p dist
+          cd mobile/build/app/outputs/flutter-apk
+          for f in *.apk; do
+            case "$f" in
+              app-release.apk)             out="immich-${SLUG}-universal.apk" ;;
+              app-arm64-v8a-release.apk)   out="immich-${SLUG}-arm64-v8a.apk" ;;
+              app-armeabi-v7a-release.apk) out="immich-${SLUG}-armeabi-v7a.apk" ;;
+              app-x86_64-release.apk)      out="immich-${SLUG}-x86_64.apk" ;;
+              *)                           out="immich-${SLUG}-${f}" ;;
+            esac
+            cp "$f" "${GITHUB_WORKSPACE}/dist/${out}"
+          done
+          cd "${GITHUB_WORKSPACE}"
+          {
+            echo "### APK di \`${REF_NAME}\`"
+            for f in dist/*.apk; do echo "- \`$(basename "$f")\` ($(du -h "$f" | cut -f1))"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Carica gli APK come artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: immich-apk-${{ github.run_id }}
+          path: dist/*.apk
+          retention-days: 30
+
+      - name: Pubblica la Release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+          TITLE: ${{ inputs.release_name }}
+          NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" dist/*.apk \
+            --title "${TITLE:-$TAG}" \
+            --notes "${NOTES:-APK generati automaticamente.}" \
+            --latest
