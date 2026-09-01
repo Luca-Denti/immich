@@ -46,6 +46,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      DCM_CI_KEY: ${{ secrets.DCM_CI_KEY }}
+      DCM_EMAIL: ${{ secrets.DCM_EMAIL }}
     defaults:
       run:
         working-directory: ./mobile
@@ -79,8 +82,16 @@ jobs:
       - name: Perform codegen
         run: mise //mobile:codegen
 
-      - name: Run analyze
-        run: mise //mobile:analyze
+      - name: Run Dart analyze
+        run: mise //mobile:analyze:dart
+
+      - name: Run DCM analyze
+        if: ${{ env.DCM_CI_KEY != '' && env.DCM_EMAIL != '' }}
+        run: mise //mobile:analyze:dcm
+
+      - name: Skip DCM analyze without CI license
+        if: ${{ env.DCM_CI_KEY == '' || env.DCM_EMAIL == '' }}
+        run: echo "DCM CI license is not configured; skipping DCM analysis."
 
       - name: Run format
         run: mise //mobile:format
