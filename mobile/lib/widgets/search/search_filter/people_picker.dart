@@ -24,7 +24,10 @@ class PeoplePicker extends HookConsumerWidget {
     const imageSize = 60.0;
     final searchQuery = useState('');
     final people = ref.watch(getAllPeopleProvider);
-    final selectedPeople = useState<Set<Person>>(filter ?? {});
+    // Keep a local copy while the picker is open. Mutating the set passed by
+    // the parent would update the committed search filter before tapping
+    // "Apply", causing the search page to see no filter change.
+    final selectedPeople = useState<Set<Person>>({...filter ?? const <Person>{}});
 
     return Column(
       children: [
